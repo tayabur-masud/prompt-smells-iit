@@ -1,0 +1,9 @@
+pyarrow>=14.0
+openai>=1.40
+pydantic>=2.5
+python-dotenv>=1.0
+PyYAML>=6.0
+requests>=2.31
+tenacity>=8.2
+tqdm>=4.66
+pytest>=7.4

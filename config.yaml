@@ -1,0 +1,26 @@
+# Non-secret settings. LLM credentials and provider settings belong in .env
+# (LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, ...); environment values override the llm block below.
+# CLI flags override everything.
+
+dataset:
+  # A Hugging Face "/blob/" URL is accepted and converted to its "/resolve/" download URL.
+  url: "https://huggingface.co/datasets/allenai/WildChat/blob/main/data/train-00003-of-00006.parquet"
+  local_path: null        # set to a .parquet path to skip downloading
+  cache_dir: "data"       # downloaded file is cached here
+  max_records: null       # null = read every dataset row
+  sample_rate: null       # e.g. 0.1 keeps a deterministic 10% of conversations
+  read_batch_size: 2000
+
+llm:
+  json_mode: true         # sends response_format={"type": "json_object"}; set false if unsupported
+
+processing:
+  max_prompts: null       # null = analyze every English user prompt
+  concurrency: 5
+  requests_per_minute: null
+  retry_attempts: 3
+  max_prompt_chars: 12000 # longer prompts are truncated when sent for analysis (output keeps the original)
+  output_file: "output/prompt_smells.json"
+  checkpoint_file: "output/checkpoint.jsonl"
+  failures_file: "output/failures.jsonl"
+  resume: false
