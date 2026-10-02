@@ -80,6 +80,8 @@ USER_TEMPLATE = (
 
 _CANONICAL = {name.lower(): name for name in (*SMELL_CATEGORIES, OTHER_CATEGORY)}
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+# reasoning models emit these before the answer
+_REASONING_RE = re.compile(r"<(thought|think|thinking)>.*?(</\1>|$)", re.DOTALL | re.IGNORECASE)
 
 
 class InvalidAnalysisResponse(ValueError):
@@ -124,6 +126,9 @@ def _extract_json_object(text: str) -> Any:
 def parse_analysis_response(text: str) -> AnalysisResult:
     if not text or not text.strip():
         raise InvalidAnalysisResponse("Empty response")
+    text = _REASONING_RE.sub("", text)
+    if not text.strip():
+        raise InvalidAnalysisResponse("Response contained only reasoning, no answer")
     data = _extract_json_object(text)
     if isinstance(data, list):
         data = {"smells": data}

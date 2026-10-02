@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 from typing import Optional
 
 from tqdm.contrib.logging import logging_redirect_tqdm
@@ -24,14 +25,23 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--config", default="config.yaml", help="YAML config file (default: config.yaml)")
     parser.add_argument("--env-file", default=".env", help="dotenv file with LLM_* settings (default: .env)")
     parser.add_argument("--dataset", help="Dataset URL (Hugging Face blob/resolve URL) or local .parquet path")
+    parser.add_argument("--prompts", metavar="PATH",
+                        help="Pre-filtered prompts Parquet to analyze (default: dataset.prompts_file in config.yaml)")
+    parser.add_argument("--from-dataset", action="store_true",
+                        help="Ignore the prompts file and extract prompts from the raw WildChat dataset")
     parser.add_argument("--max-prompts", type=int, help="Analyze only the first N English user prompts (default: all)")
     parser.add_argument("--max-records", type=int, help="Read only the first N dataset rows (default: all)")
     parser.add_argument("--sample-rate", type=float, help="Deterministic fraction of conversations to keep, e.g. 0.1")
+    parser.add_argument("--output-dir", metavar="DIR",
+                        help="Put prompt_smells.json, checkpoint.jsonl and failures.jsonl in DIR (keeps runs separate)")
     parser.add_argument("--output", help="Output JSON file (default: output/prompt_smells.json)")
     parser.add_argument("--concurrency", type=int, help="Number of concurrent LLM requests")
     parser.add_argument("--requests-per-minute", type=int, help="Client-side cap on LLM requests per minute")
     parser.add_argument("--retry-attempts", type=int, help="Attempts per prompt for transient/invalid responses")
     parser.add_argument("--resume", action="store_true", help="Skip prompts already recorded in the checkpoint")
+    parser.add_argument("--export-prompts", metavar="PATH", nargs="?", const="",
+                        help="Also save the selected input prompts to a Parquet file (works with --dry-run); "
+                             "without PATH: <dataset cache_dir>/prompts_<max-prompts|all>.parquet")
     parser.add_argument("--dry-run", action="store_true", help="Parse and count prompts without calling the LLM")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     return parser.parse_args(argv)
@@ -44,12 +54,21 @@ def apply_overrides(config: Config, args: argparse.Namespace) -> Config:
             dataset.url, dataset.local_path = args.dataset, None
         else:
             dataset.local_path = args.dataset
+    if args.prompts:
+        dataset.prompts_file = args.prompts
+    if args.from_dataset:
+        dataset.prompts_file = None
     if args.max_prompts is not None:
         processing.max_prompts = args.max_prompts
     if args.max_records is not None:
         dataset.max_records = args.max_records
     if args.sample_rate is not None:
         dataset.sample_rate = args.sample_rate
+    if args.output_dir:
+        out_dir = Path(args.output_dir)
+        processing.output_file = str(out_dir / "prompt_smells.json")
+        processing.checkpoint_file = str(out_dir / "checkpoint.jsonl")
+        processing.failures_file = str(out_dir / "failures.jsonl")
     if args.output:
         processing.output_file = args.output
     if args.concurrency is not None:
@@ -62,6 +81,15 @@ def apply_overrides(config: Config, args: argparse.Namespace) -> Config:
         processing.resume = True
     # re-validate so CLI values get the same bounds checks as config values
     return Config.model_validate(config.model_dump())
+
+
+def resolve_export_path(config: Config, export_arg: Optional[str]) -> Optional[str]:
+    if export_arg is None:
+        return None
+    if export_arg:
+        return export_arg
+    suffix = config.processing.max_prompts or "all"
+    return str(Path(config.dataset.cache_dir) / f"prompts_{suffix}.parquet")
 
 
 def setup_logging(verbose: bool) -> None:
@@ -77,9 +105,11 @@ def setup_logging(verbose: bool) -> None:
 
 
 def print_summary(summary: RunSummary) -> None:
-    ext, ana = summary.extraction, summary.analysis
+    ext = summary.extraction
     if summary.dry_run:
         run_kind = "Dry run (no LLM calls)"
+    elif summary.prompts_file:
+        run_kind = "Prompt file run" + (" (limited)" if summary.limited else "")
     elif summary.limited:
         run_kind = "Test/sample run"
     else:
@@ -87,8 +117,26 @@ def print_summary(summary: RunSummary) -> None:
     if summary.interrupted:
         run_kind += " - INTERRUPTED"
 
-    line = "=" * 60
-    rows = [
+    if summary.prompts_file:
+        rows = [
+            ("Run type", run_kind),
+            ("Input prompts file", summary.prompts_file),
+            ("Prompt rows read", f"{ext.records_read:,}"),
+            ("Invalid rows skipped", f"{ext.malformed_records:,}"),
+            ("Duplicate prompts skipped", f"{summary.duplicate_prompts:,}"),
+            ("Prompts selected", f"{summary.prompts_selected:,}"),
+        ]
+    else:
+        rows = dataset_rows(summary, run_kind)
+    if ext.sampled_out:
+        rows.append(("Conversations sampled out", f"{ext.sampled_out:,}"))
+    rows += analysis_rows(summary)
+    print_table(summary, rows)
+
+
+def dataset_rows(summary: RunSummary, run_kind: str) -> list[tuple[str, str]]:
+    ext = summary.extraction
+    return [
         ("Run type", run_kind),
         ("Dataset records available", f"{summary.dataset_rows_total:,}"),
         ("Dataset records read", f"{ext.records_read:,}"),
@@ -99,21 +147,29 @@ def print_summary(summary: RunSummary) -> None:
         ("Duplicate prompts skipped", f"{summary.duplicate_prompts:,}"),
         ("Prompts selected", f"{summary.prompts_selected:,}"),
     ]
-    if ext.sampled_out:
-        rows.append(("Conversations sampled out", f"{ext.sampled_out:,}"))
-    if not summary.dry_run:
-        rows += [
-            ("Skipped (already processed)", f"{ana.already_processed:,}"),
-            ("Prompts sent to the LLM", f"{ana.sent_to_llm:,}"),
-            ("Successfully analyzed", f"{ana.analyzed:,}"),
-            ("API/analysis failures", f"{ana.failed:,}"),
-            ("  with smells (this run)", f"{ana.with_smells:,}"),
-            ("  without smells (this run)", f"{ana.without_smells:,}"),
-            ("Prompts in output file", f"{summary.output.prompts:,}"),
-            ("  with smells", f"{summary.output.prompts_with_smells:,}"),
-            ("  without smells", f"{summary.output.prompts - summary.output.prompts_with_smells:,}"),
-            ("Output records", f"{summary.output.records:,}"),
-        ]
+
+
+def analysis_rows(summary: RunSummary) -> list[tuple[str, str]]:
+    ana = summary.analysis
+    if summary.dry_run:
+        return []
+    return [
+        ("Skipped (already processed)", f"{ana.already_processed:,}"),
+        ("Prompts sent to the LLM", f"{ana.sent_to_llm:,}"),
+        ("Successfully analyzed", f"{ana.analyzed:,}"),
+        ("API/analysis failures", f"{ana.failed:,}"),
+        ("  with smells (this run)", f"{ana.with_smells:,}"),
+        ("  without smells (this run)", f"{ana.without_smells:,}"),
+        ("Prompts in output file", f"{summary.output.prompts:,}"),
+        ("  with smells", f"{summary.output.prompts_with_smells:,}"),
+        ("  without smells", f"{summary.output.prompts - summary.output.prompts_with_smells:,}"),
+        ("Output records", f"{summary.output.records:,}"),
+    ]
+
+
+def print_table(summary: RunSummary, rows: list[tuple[str, str]]) -> None:
+    ana = summary.analysis
+    line = "=" * 60
     width = max(len(label) for label, _ in rows)
     if run_failed(summary):
         title = "Prompt Smell Detection FAILED"
@@ -188,7 +244,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         with logging_redirect_tqdm():
-            summary = Pipeline(config, analyzer).run(dry_run=args.dry_run)
+            summary = Pipeline(config, analyzer).run(
+                dry_run=args.dry_run, export_prompts=resolve_export_path(config, args.export_prompts)
+            )
     except Exception as exc:
         logger.error("Fatal error: %s", exc, exc_info=args.verbose)
         return 1

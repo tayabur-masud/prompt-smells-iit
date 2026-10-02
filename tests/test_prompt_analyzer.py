@@ -99,3 +99,14 @@ def test_all_categories_are_named_in_system_prompt() -> None:
     from app.prompt_analyzer import SYSTEM_PROMPT
 
     assert all(name in SYSTEM_PROMPT for name in SMELL_CATEGORIES)
+
+
+def test_reasoning_blocks_are_stripped() -> None:
+    text = '<thought>Maybe {"smells": [{"type": "Wrong", "reason": "x"}]}?</thought>\n{"smells": []}'
+    assert parse_analysis_response(text).smells == []
+    assert parse_analysis_response('<think>hmm</think>{"smells": []}').smells == []
+
+
+def test_unfinished_reasoning_is_invalid() -> None:
+    with pytest.raises(InvalidAnalysisResponse, match="only reasoning"):
+        parse_analysis_response("<thought>still thinking, cut off by max_tokens")

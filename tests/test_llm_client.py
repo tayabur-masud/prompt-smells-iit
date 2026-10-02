@@ -122,3 +122,13 @@ def test_api_key_not_exposed_in_config_repr() -> None:
 
 def test_rate_limiter_disabled_by_default() -> None:
     RateLimiter(None).acquire()
+
+
+def test_safety_blocked_response_fails_without_retry() -> None:
+    blocked = SimpleNamespace(
+        choices=[SimpleNamespace(message=None, finish_reason="content_filter: PROHIBITED_CONTENT")]
+    )
+    client, completions = make_client([blocked, _response("never used")])
+    with pytest.raises(LLMError, match="refused") as info:
+        client.complete("s", "u")
+    assert not info.value.fatal and len(completions.kwargs) == 1

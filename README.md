@@ -98,6 +98,25 @@ Measured on this file (`python main.py --dry-run`):
 | English user messages         | 96,185  |
 | Unique English prompts        | 95,298  |
 
+## Input modes
+
+| Mode | When | What is read |
+|---|---|---|
+| **Prompt file** (default) | `dataset.prompts_file` is set in `config.yaml` (currently `data/prompts_1000.parquet`), or `--prompts PATH` | A pre-filtered Parquet of English user prompts. Conversation parsing is skipped. |
+| **Raw dataset** | `prompts_file: null`, or `--from-dataset` | The WildChat Parquet, parsed and filtered as described above. |
+
+A prompt file needs the columns `conversation_id`, `model`, `timestamp`, and `content`.
+`--export-prompts` writes one, and also adds `prompt_id`. Prompt IDs are computed the same way in
+both modes, so the checkpoint carries over and `--resume` works across modes. Rows with an empty
+`content` or `conversation_id` are skipped, and duplicate prompts are dropped. `--max-prompts`
+and `--sample-rate` apply in both modes.
+
+```bash
+python main.py --resume                                   # analyze data/prompts_1000.parquet
+python main.py --prompts data/my_prompts.parquet          # a different prompt file
+python main.py --from-dataset --max-prompts 100           # extract from the raw WildChat file
+```
+
 ## Smell categories
 
 1. Vague / Missing Context
@@ -151,6 +170,15 @@ python main.py --output output/results.json --concurrency 10 --requests-per-minu
 python main.py --sample-rate 0.05      # deterministic 5% sample of conversations
 python main.py --dataset path/to/local.parquet
 ```
+
+To save the selected input prompts (without LLM results) as Parquet, add `--export-prompts`.
+With no path, the file goes to the dataset folder, e.g. `data/prompts_1000.parquet`:
+
+```bash
+python main.py --max-prompts 1000 --dry-run --export-prompts
+```
+
+Columns: `prompt_id` (joins to the checkpoint), `conversation_id`, `model`, `timestamp`, `content`.
 
 `--max-prompts N` takes the first N unique English prompts in dataset order. Leaving it out
 means no limit.

@@ -100,3 +100,19 @@ class DatasetLoader:
                     return
                 yielded += 1
                 yield record
+
+
+PROMPT_FILE_COLUMNS: tuple[str, ...] = ("conversation_id", "model", "timestamp", "content")
+
+
+def iter_prompt_file(path: str, read_batch_size: int = 2000) -> Iterator[dict[str, Any]]:
+    """Yield rows of a pre-filtered prompts Parquet (as written by --export-prompts)."""
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Prompts file not found: {file_path}")
+    parquet = pq.ParquetFile(file_path)
+    missing = [c for c in PROMPT_FILE_COLUMNS if c not in parquet.schema_arrow.names]
+    if missing:
+        raise ValueError(f"Prompts file is missing required columns: {missing}")
+    for batch in parquet.iter_batches(batch_size=read_batch_size, columns=list(PROMPT_FILE_COLUMNS)):
+        yield from batch.to_pylist()

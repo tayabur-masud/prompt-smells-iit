@@ -19,6 +19,7 @@ DEFAULT_DATASET_URL = (
 class DatasetConfig(BaseModel):
     url: str = DEFAULT_DATASET_URL
     local_path: Optional[str] = None
+    prompts_file: Optional[str] = None  # pre-filtered prompts Parquet; bypasses conversation parsing
     cache_dir: str = "data"
     max_records: Optional[int] = Field(default=None, ge=1)
     sample_rate: Optional[float] = Field(default=None, gt=0, le=1)

@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from pydantic import ValidationError
 
 from app.models import AnalysisResult, ExtractedPrompt, OutputRecord
@@ -162,3 +164,20 @@ def validate_output_file(path: str) -> tuple[bool, int, Optional[str]]:
         except ValidationError as exc:
             return False, len(data), f"Record {index} failed schema validation: {exc.error_count()} error(s)"
     return True, len(data), None
+
+
+def write_prompts_parquet(prompts: list[ExtractedPrompt], path: str) -> int:
+    """Export the selected input prompts (no LLM results) to a Parquet file."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "prompt_id": pa.array([p.prompt_id for p in prompts], pa.string()),
+            "conversation_id": pa.array([p.conversation_id for p in prompts], pa.string()),
+            "model": pa.array([p.model for p in prompts], pa.string()),
+            "timestamp": pa.array([p.timestamp for p in prompts], pa.string()),
+            "content": pa.array([p.content for p in prompts], pa.string()),
+        }
+    )
+    pq.write_table(table, target)
+    return table.num_rows

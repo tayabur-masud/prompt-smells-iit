@@ -9,7 +9,7 @@ env/
 .idea/
 .vscode/
 .DS_Store
-data/
-output/
+data/*
 *.parquet
 *.part
+!data/prompts_1000.parquet

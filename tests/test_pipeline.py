@@ -194,3 +194,78 @@ def test_validation_detects_bad_output(tmp_path) -> None:
     assert validate_output_file(str(bad))[0] is False
     bad.write_text('[{"conversation_id": "x"}]', encoding="utf-8")
     assert validate_output_file(str(bad))[0] is False
+
+
+def test_export_prompts_parquet_matches_selection(tmp_path, make_parquet, sample_rows) -> None:
+    import pyarrow.parquet as pq
+
+    config = make_config(tmp_path, make_parquet(sample_rows), max_prompts=2)
+    export = tmp_path / "out" / "prompts.parquet"
+    summary = Pipeline(config, PromptAnalyzer(FakeLLMClient(responder))).run(  # type: ignore[arg-type]
+        dry_run=True, export_prompts=str(export)
+    )
+    table = pq.read_table(export).to_pylist()
+    assert len(table) == summary.prompts_selected == 2
+    assert set(table[0]) == {"prompt_id", "conversation_id", "model", "timestamp", "content"}
+    assert [r["content"] for r in table] == ["Help me fix this.", "Write a haiku about rain."]
+
+
+def test_prompt_file_round_trip_and_resume_across_modes(tmp_path, make_parquet, sample_rows) -> None:
+    config = make_config(tmp_path, make_parquet(sample_rows), max_prompts=1)
+    export = tmp_path / "data" / "prompts.parquet"
+    run(config, FakeLLMClient(responder))  # dataset mode analyzes the first prompt only
+    Pipeline(config, PromptAnalyzer(FakeLLMClient(responder))).run(  # type: ignore[arg-type]
+        dry_run=True, export_prompts=str(export)
+    )
+    config.processing.max_prompts = None
+    Pipeline(config, PromptAnalyzer(FakeLLMClient(responder))).run(  # type: ignore[arg-type]
+        dry_run=True, export_prompts=str(export)
+    )
+
+    config.dataset.prompts_file = str(export)
+    config.dataset.local_path = str(tmp_path / "raw-dataset-not-needed.parquet")
+    config.processing.resume = True
+    fake = FakeLLMClient(responder)
+    summary = run(config, fake)
+    assert summary.prompts_file == str(export)
+    assert summary.extraction.records_read == 3 and summary.prompts_selected == 3
+    assert summary.analysis.already_processed == 1 and len(fake.calls) == 2
+    assert summary.output.prompts == 3 and summary.output_valid
+
+
+def test_prompt_file_skips_invalid_rows_and_respects_max_prompts(tmp_path) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from app.pipeline import load_prompt_file
+
+    path = tmp_path / "p.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "conversation_id": ["a", "b", None, "c", "a", "d"],
+                "model": ["m"] * 6,
+                "timestamp": ["t"] * 6,
+                "content": ["one", "  ", "x", "three", "one", "four"],
+            }
+        ),
+        path,
+    )
+    prompts, stats, duplicates = load_prompt_file(str(path), max_prompts=None, sample_rate=None)
+    assert [p.content for p in prompts] == ["one", "three", "four"]
+    assert stats.malformed_records == 2 and duplicates == 1
+    limited, _, _ = load_prompt_file(str(path), max_prompts=2, sample_rate=None)
+    assert [p.content for p in limited] == ["one", "three"]
+
+
+def test_prompt_file_missing_columns_raises(tmp_path) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import pytest
+
+    from app.dataset_loader import iter_prompt_file
+
+    path = tmp_path / "bad.parquet"
+    pq.write_table(pa.table({"content": ["hi"]}), path)
+    with pytest.raises(ValueError, match="missing required columns"):
+        list(iter_prompt_file(str(path)))

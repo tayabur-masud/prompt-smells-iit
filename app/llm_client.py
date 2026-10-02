@@ -172,4 +172,9 @@ class LLMClient:
         response = self.client.chat.completions.create(**kwargs)
         if not response.choices:
             return ""
-        return response.choices[0].message.content or ""
+        choice = response.choices[0]
+        finish_reason = str(getattr(choice, "finish_reason", "") or "")
+        if choice.message is None or finish_reason.startswith("content_filter"):
+            # a safety block is deterministic for this prompt: fail it without retrying
+            raise LLMError(f"Provider refused to analyze this prompt (finish_reason={finish_reason or 'none'})")
+        return choice.message.content or ""

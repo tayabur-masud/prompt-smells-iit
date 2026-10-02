@@ -10,8 +10,8 @@ from typing import Iterable, Optional
 from tqdm import tqdm
 
 from app.config import Config
-from app.conversation_parser import ConversationParser
-from app.dataset_loader import DatasetLoader
+from app.conversation_parser import ConversationParser, format_timestamp, is_in_sample
+from app.dataset_loader import DatasetLoader, iter_prompt_file
 from app.llm_client import LLMError
 from app.models import AnalysisResult, AnalysisStats, ExtractedPrompt, ExtractionStats
 from app.output_writer import (
@@ -21,6 +21,7 @@ from app.output_writer import (
     OutputWriter,
     build_output_records,
     validate_output_file,
+    write_prompts_parquet,
 )
 from app.prompt_analyzer import PromptAnalyzer
 
@@ -42,6 +43,7 @@ class RunSummary:
     aborted_reason: Optional[str] = None
     dry_run: bool = False
     limited: bool = False
+    prompts_file: Optional[str] = None
 
 
 def extract_prompts(
@@ -72,6 +74,42 @@ def extract_prompts(
     return prompts, duplicates
 
 
+def load_prompt_file(
+    path: str,
+    max_prompts: Optional[int],
+    sample_rate: Optional[float],
+    read_batch_size: int = 2000,
+) -> tuple[list[ExtractedPrompt], ExtractionStats, int]:
+    """Read pre-filtered prompts; returns unique prompts, row stats, and duplicates dropped."""
+    stats = ExtractionStats()
+    prompts: list[ExtractedPrompt] = []
+    seen: set[str] = set()
+    duplicates = 0
+    for row in iter_prompt_file(path, read_batch_size):
+        stats.records_read += 1
+        conversation_id, content = row.get("conversation_id"), row.get("content")
+        if not isinstance(conversation_id, str) or not conversation_id.strip() or (
+            not isinstance(content, str) or not content.strip()
+        ):
+            stats.malformed_records += 1
+            continue
+        if not is_in_sample(conversation_id, sample_rate):
+            stats.sampled_out += 1
+            continue
+        prompt = ExtractedPrompt(
+            conversation_id, str(row.get("model") or ""), format_timestamp(row.get("timestamp")), content
+        )
+        if prompt.prompt_id in seen:
+            duplicates += 1
+            continue
+        seen.add(prompt.prompt_id)
+        stats.english_user_messages += 1
+        prompts.append(prompt)
+        if max_prompts is not None and len(prompts) >= max_prompts:
+            break
+    return prompts, stats, duplicates
+
+
 class Pipeline:
     def __init__(
         self,
@@ -93,17 +131,32 @@ class Pipeline:
         self.writer = OutputWriter(processing.output_file)
         self._fatal_error: Optional[str] = None
 
-    def run(self, dry_run: bool = False) -> RunSummary:
+    def run(self, dry_run: bool = False, export_prompts: Optional[str] = None) -> RunSummary:
         processing = self.config.processing
+        prompts_file = self.config.dataset.prompts_file
         summary = RunSummary(
             output_file=processing.output_file,
             dry_run=dry_run,
+            prompts_file=prompts_file,
             limited=bool(
                 processing.max_prompts
                 or self.config.dataset.max_records
                 or self.config.dataset.sample_rate
             ),
         )
+
+        if prompts_file:
+            logger.info("Loading pre-filtered prompts from %s...", prompts_file)
+            prompts, summary.extraction, summary.duplicate_prompts = load_prompt_file(
+                prompts_file,
+                processing.max_prompts,
+                self.config.dataset.sample_rate,
+                self.config.dataset.read_batch_size,
+            )
+            summary.dataset_rows_total = summary.extraction.records_read
+            summary.prompts_selected = len(prompts)
+            logger.info("Loaded prompts: %d", len(prompts))
+            return self._analyze_and_write(prompts, summary, dry_run, export_prompts)
 
         logger.info("Loading dataset...")
         summary.dataset_rows_total = self.loader.count_records()
@@ -121,6 +174,19 @@ class Pipeline:
         summary.extraction = parser.stats
         summary.prompts_selected = len(prompts)
         logger.info("Extracted English user prompts: %d", len(prompts))
+        return self._analyze_and_write(prompts, summary, dry_run, export_prompts)
+
+    def _analyze_and_write(
+        self,
+        prompts: list[ExtractedPrompt],
+        summary: RunSummary,
+        dry_run: bool,
+        export_prompts: Optional[str],
+    ) -> RunSummary:
+        processing = self.config.processing
+        if export_prompts:
+            count = write_prompts_parquet(prompts, export_prompts)
+            logger.info("Exported %d selected prompts to %s", count, export_prompts)
 
         if dry_run:
             return summary

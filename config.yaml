@@ -6,6 +6,9 @@ dataset:
   # A Hugging Face "/blob/" URL is accepted and converted to its "/resolve/" download URL.
   url: "https://huggingface.co/datasets/allenai/WildChat/blob/main/data/train-00003-of-00006.parquet"
   local_path: null        # set to a .parquet path to skip downloading
+  # Pre-filtered English user prompts (from --export-prompts). When set, the raw dataset is not read;
+  # set to null or pass --from-dataset to extract prompts from the WildChat file instead.
+  prompts_file: "data/prompts_1000.parquet"
   cache_dir: "data"       # downloaded file is cached here
   max_records: null       # null = read every dataset row
   sample_rate: null       # e.g. 0.1 keeps a deterministic 10% of conversations
